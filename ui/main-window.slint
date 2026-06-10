@@ -1,0 +1,101 @@
+// ui/app_launcher.slint
+import { Button, ScrollView } from "std-widgets.slint";
+
+export struct AppItem {
+    name: string,
+    path: string,
+}
+
+export component MainWindow inherits Window {
+    width: 550px;
+    height: 450px;
+    title: "Game Launcher";
+    background: #f7fafc;
+
+    callback launch_app(string);
+    callback add_app_clicked();
+    callback delete_app(int);
+
+    in-out property <[AppItem]> apps: [];
+
+    // ショートカット入力を受け取るためのフォーカススコープ
+    FocusScope {
+        VerticalLayout {
+            padding: 20px;
+            spacing: 15px;
+
+            Text {
+                text: "ゲームランチャー";
+                font-size: 22px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                color: #2d3748;
+            }
+
+            ScrollView {
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 10px;
+                    for app[idx] in root.apps : Rectangle {
+                        background: #ffffff;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #e2e8f0;
+                        height: 60px;
+
+                        HorizontalLayout {
+                            padding-left: 15px;
+                            padding-right: 15px;
+                            spacing: 12px;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                Text {
+                                    text: app.name;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    color: #1a202c;
+                                }
+                                Text {
+                                    text: app.path;
+                                    font-size: 11px;
+                                    color: #718096;
+                                    overflow: elide;
+                                }
+                            }
+
+                            // スペーサー（右寄せ用）
+                            Rectangle {}
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 8px;
+                                Button {
+                                    text: "起動";
+                                   
+                                    clicked => {
+                                        root.launch_app(app.path);
+                                    }
+                                }
+                                Button {
+                                    text: "削除";
+                                    clicked => {
+                                        root.delete_app(idx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Button {
+                text: "+ アプリケーションを追加";
+                clicked => {
+                    root.add_app_clicked();
+                }
+            }
+        }
+    }
+}

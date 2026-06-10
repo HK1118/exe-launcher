@@ -1,0 +1,26 @@
+[
+  {
+    "name": "メモ帳",
+    "path": "notepad.exe"
+  },
+  {
+    "name": "電卓",
+    "path": "calc.exe"
+  },
+  {
+    "name": "ペイント",
+    "path": "mspaint.exe"
+  },
+  {
+    "name": "エクスプローラー",
+    "path": "explorer.exe"
+  },
+  {
+    "name": "タスクマネージャー",
+    "path": "taskmgr.exe"
+  },
+  {
+    "name": "レジストリエディタ",
+    "path": "regedit.exe"
+  }
+]
