@@ -7,8 +7,10 @@ export struct AppItem {
 }
 
 export component MainWindow inherits Window {
-    width: 550px;
-    height: 450px;
+    preferred-width: 550px;
+    preferred-height: 450px;
+    min-width: 400px;
+    min-height: 300px;
     title: "Game Launcher";
     background: #f7fafc;
 
@@ -17,6 +19,8 @@ export component MainWindow inherits Window {
     callback delete_app(int);
 
     in-out property <[AppItem]> apps: [];
+    in-out property <int> app_name_font_size: 14;
+    in-out property <int> app_path_font_size: 11;
 
     // ショートカット入力を受け取るためのフォーカススコープ
     FocusScope {
@@ -33,6 +37,7 @@ export component MainWindow inherits Window {
             }
 
             ScrollView {
+                vertical-stretch: 1;
                 VerticalLayout {
                     alignment: start;
                     spacing: 10px;
@@ -53,13 +58,13 @@ export component MainWindow inherits Window {
                                 spacing: 2px;
                                 Text {
                                     text: app.name;
-                                    font-size: 14px;
+                                    font-size: root.app_name_font_size * 1px;
                                     font-weight: 600;
                                     color: #1a202c;
                                 }
                                 Text {
                                     text: app.path;
-                                    font-size: 11px;
+                                    font-size: root.app_path_font_size * 1px;
                                     color: #718096;
                                     overflow: elide;
                                 }

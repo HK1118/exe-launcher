@@ -1,12 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
-use slint::{Model, VecModel, SharedString};
+use std::sync::atomic::{AtomicBool, Ordering};
+use slint::{Model, VecModel, SharedString, Timer, TimerMode};
 use rfd::FileDialog;
 use serde::{Serialize, Deserialize};
 use notify::{Watcher, Event};
+use slint::winit_030::{CustomApplicationHandler, EventResult};
 
 // ビルドスクリプトによって出力されたRustコードを取り込む
 slint::include_modules!();
@@ -20,7 +23,7 @@ struct SavedApp {
 
 // 2. メイン（UI）スレッドからのみアクセスされる、モデルへのスレッドローカル参照
 thread_local! {
-    static APPS_MODEL: RefCell<Option<Rc<VecModel<AppItem>>>> = RefCell::new(None);
+    static APPS_MODEL: RefCell<Option<Rc<VecModel<AppItem>>>> = const { RefCell::new(None) };
 }
 
 // ファイルからデータを読み込む関数
@@ -38,7 +41,68 @@ fn save_apps(apps: &[SavedApp]) {
     }
 }
 
+// 3. 設定用の構造体
+#[derive(Serialize, Deserialize, Clone)]
+struct Settings {
+    confirm_on_delete: bool,
+    app_name_font_size: i32,
+    app_path_font_size: i32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            confirm_on_delete: true,
+            app_name_font_size: 14,
+            app_path_font_size: 11,
+        }
+    }
+}
+
+// settings.json から読み込む（なければデフォルトで作成）
+fn load_settings() -> Settings {
+    match std::fs::read_to_string("settings.json") {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => {
+            let defaults = Settings::default();
+            if let Ok(json) = serde_json::to_string_pretty(&defaults) {
+                let _ = std::fs::write("settings.json", json);
+            }
+            defaults
+        }
+    }
+}
+
+// 4. DnDハンドラ（OSからのファイルドロップをキャプチャ）
+struct DndHandler {
+    pending_files: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+impl CustomApplicationHandler for DndHandler {
+    fn window_event(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        _winit_window: Option<&winit::window::Window>,
+        _slint_window: Option<&slint::Window>,
+        event: &winit::event::WindowEvent,
+    ) -> EventResult {
+        if let winit::event::WindowEvent::DroppedFile(path) = event {
+            self.pending_files.lock().unwrap().push(path.clone());
+        }
+        EventResult::Propagate
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // DnDバックエンドの設定（MainWindow生成前に必要）
+    let pending_files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let _backend = slint::BackendSelector::new()
+        .with_winit_custom_application_handler(DndHandler {
+            pending_files: pending_files.clone(),
+        })
+        .select();
+
     let ui = MainWindow::new()?;
 
     // データの読み込みと、スレッド間で共有する「現在の最新データ状態」
@@ -62,6 +126,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // UIにモデルを設定
     ui.set_apps(apps_model.clone().into());
 
+    // 設定の読み込みと適用
+    let settings = load_settings();
+    ui.set_app_name_font_size(settings.app_name_font_size);
+    ui.set_app_path_font_size(settings.app_path_font_size);
+    let confirm_on_delete = Arc::new(AtomicBool::new(settings.confirm_on_delete));
+
     // --- コールバック処理の実装 ---
 
     // 1. 起動処理
@@ -72,68 +142,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 2. アプリの追加処理
+    // 2. アプリの追加処理（複数ファイル対応）
     let apps_model_clone = apps_model.clone();
     let shared_apps_clone = shared_apps.clone();
     ui.on_add_app_clicked(move || {
-        if let Some(file_path) = FileDialog::new()
-            .add_filter("実行ファイル", &["exe"])
-            .pick_file()
+        if let Some(file_paths) = FileDialog::new()
+            .add_filter("実行可能ファイル", &["exe", "lnk", "bat"])
+            .pick_files()
         {
-            let name = file_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown")
-                .to_string();
-            let path = file_path.to_string_lossy().to_string();
+            let mut new_apps = Vec::new();
 
-            let new_app = SavedApp { name: name.clone(), path: path.clone() };
+            for file_path in &file_paths {
+                let name = file_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                let path = file_path.to_string_lossy().to_string();
 
-            // 共有状態を更新してファイルへ保存
-            {
-                let mut apps = shared_apps_clone.lock().unwrap();
-                apps.push(new_app);
-                save_apps(&apps);
+                new_apps.push(SavedApp { name: name.clone(), path: path.clone() });
+
+                apps_model_clone.push(AppItem {
+                    name: SharedString::from(name),
+                    path: SharedString::from(path),
+                });
             }
 
-            // UIモデルも更新
-            apps_model_clone.push(AppItem {
-                name: SharedString::from(name),
-                path: SharedString::from(path),
-            });
+            if !new_apps.is_empty() {
+                let mut apps = shared_apps_clone.lock().unwrap();
+                apps.extend(new_apps);
+                save_apps(&apps);
+            }
         }
     });
 
     // 3. アプリの削除処理（確認ダイアログ付き）
     let apps_model_clone = apps_model.clone();
     let shared_apps_clone = shared_apps.clone();
+    let confirm_on_delete_clone = confirm_on_delete.clone();
     ui.on_delete_app(move |idx| {
         if idx >= 0 && (idx as usize) < apps_model_clone.row_count() {
-            let app_name = apps_model_clone
-                .row_data(idx as usize)
-                .map(|app| app.name.to_string())
-                .unwrap_or_else(|| "アプリケーション".to_string());
+            // 確認ダイアログの表示が設定されている場合のみ表示
+            if confirm_on_delete_clone.load(Ordering::Relaxed) {
+                let app_name = apps_model_clone
+                    .row_data(idx as usize)
+                    .map(|app| app.name.to_string())
+                    .unwrap_or_else(|| "アプリケーション".to_string());
 
-            let confirm = rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Warning)
-                .set_title("削除の確認")
-                .set_description(format!("「{}」を一覧から削除してもよろしいですか？", app_name))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show();
+                let confirm = rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_title("削除の確認")
+                    .set_description(format!("「{}」を一覧から削除してもよろしいですか？", app_name))
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show();
 
-            if confirm == rfd::MessageDialogResult::Yes {
-                // 共有状態を更新してファイルへ保存
-                {
-                    let mut apps = shared_apps_clone.lock().unwrap();
-                    if (idx as usize) < apps.len() {
-                        apps.remove(idx as usize);
-                        save_apps(&apps);
-                    }
+                if confirm != rfd::MessageDialogResult::Yes {
+                    return;
                 }
-
-                // UIモデルから削除
-                apps_model_clone.remove(idx as usize);
             }
+
+            // 共有状態を更新してファイルへ保存
+            {
+                let mut apps = shared_apps_clone.lock().unwrap();
+                if (idx as usize) < apps.len() {
+                    apps.remove(idx as usize);
+                    save_apps(&apps);
+                }
+            }
+
+            // UIモデルから削除
+            apps_model_clone.remove(idx as usize);
         }
     });
 
@@ -182,6 +260,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 監視インスタンス（watcher）がmain関数を抜けて自動消滅（ドロップ）しないよう、変数として保持
     let _watcher = watcher;
+
+    // DnD でドロップされたファイルを定期的に処理
+    let pending_files_timer = pending_files.clone();
+    let apps_model_dnd = apps_model.clone();
+    let shared_apps_dnd = shared_apps.clone();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, std::time::Duration::from_millis(200), move || {
+        let paths: Vec<PathBuf> = {
+            let mut pending = pending_files_timer.lock().unwrap();
+            pending.drain(..).collect()
+        };
+        if paths.is_empty() {
+            return;
+        }
+
+        let mut new_apps = Vec::new();
+        for file_path in &paths {
+            let name = file_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            let path = file_path.to_string_lossy().to_string();
+            new_apps.push(SavedApp { name: name.clone(), path: path.clone() });
+            apps_model_dnd.push(AppItem {
+                name: SharedString::from(name),
+                path: SharedString::from(path),
+            });
+        }
+
+        let mut apps = shared_apps_dnd.lock().unwrap();
+        apps.extend(new_apps);
+        save_apps(&apps);
+    });
+    let _timer = timer;
 
     ui.run()?;
     Ok(())
