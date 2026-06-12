@@ -5,11 +5,146 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+use std::ptr;
 use slint::{Model, VecModel, SharedString, Timer, TimerMode};
 use rfd::FileDialog;
 use serde::{Serialize, Deserialize};
 use notify::{Watcher, Event};
 use slint::winit_030::{CustomApplicationHandler, EventResult};
+
+type Hresult = i32;
+
+#[repr(C)]
+struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+const CLSID_SHELL_LINK: Guid = Guid {
+    data1: 0x00021401,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+const IID_ISHELL_LINK_W: Guid = Guid {
+    data1: 0x000214F9,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+const IID_IPERSIST_FILE: Guid = Guid {
+    data1: 0x0000010B,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+
+#[link(name = "ole32")]
+extern "system" {
+    fn CoInitializeEx(pvReserved: *mut std::ffi::c_void, dwCoInit: u32) -> Hresult;
+    fn CoCreateInstance(
+        rclsid: *const Guid,
+        pUnkOuter: *mut std::ffi::c_void,
+        dwClsContext: u32,
+        riid: *const Guid,
+        ppv: *mut *mut std::ffi::c_void,
+    ) -> Hresult;
+    fn CoUninitialize();
+}
+
+#[repr(C)]
+struct IShellLinkWVtbl {
+    query_interface: unsafe extern "system" fn(*mut std::ffi::c_void, *const Guid, *mut *mut std::ffi::c_void) -> Hresult,
+    add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    get_path: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u16, i32, *mut std::ffi::c_void, u32) -> Hresult,
+}
+
+#[repr(C)]
+struct IPersistFileVtbl {
+    query_interface: unsafe extern "system" fn(*mut std::ffi::c_void, *const Guid, *mut *mut std::ffi::c_void) -> Hresult,
+    add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    get_class_id: unsafe extern "system" fn(*mut std::ffi::c_void, *mut Guid) -> Hresult,
+    is_dirty: unsafe extern "system" fn(*mut std::ffi::c_void) -> Hresult,
+    load: unsafe extern "system" fn(*mut std::ffi::c_void, *const u16, u32) -> Hresult,
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+fn resolve_lnk(path: &str) -> Option<(String, String)> {
+    unsafe {
+        let co_result = CoInitializeEx(ptr::null_mut(), 2);
+        if co_result < 0 && co_result != -2147417835 {
+            return None;
+        }
+
+        let mut shell_link: *mut std::ffi::c_void = ptr::null_mut();
+        let hr = CoCreateInstance(
+            &CLSID_SHELL_LINK,
+            ptr::null_mut(),
+            1,
+            &IID_ISHELL_LINK_W,
+            &mut shell_link,
+        );
+        if hr < 0 || shell_link.is_null() {
+            if co_result >= 0 { CoUninitialize(); }
+            return None;
+        }
+
+        let sl_vtbl = *(shell_link as *mut *const IShellLinkWVtbl);
+
+        let mut persist_file: *mut std::ffi::c_void = ptr::null_mut();
+        let hr = ((*sl_vtbl).query_interface)(shell_link, &IID_IPERSIST_FILE, &mut persist_file);
+        if hr < 0 || persist_file.is_null() {
+            ((*sl_vtbl).release)(shell_link);
+            if co_result >= 0 { CoUninitialize(); }
+            return None;
+        }
+
+        let pf_vtbl = *(persist_file as *mut *const IPersistFileVtbl);
+        let wide_path = to_wide(path);
+        let hr = ((*pf_vtbl).load)(persist_file, wide_path.as_ptr(), 0);
+        if hr < 0 {
+            ((*pf_vtbl).release)(persist_file);
+            ((*sl_vtbl).release)(shell_link);
+            if co_result >= 0 { CoUninitialize(); }
+            return None;
+        }
+
+        let mut buf = [0u16; 1024];
+        let hr = ((*sl_vtbl).get_path)(shell_link, buf.as_mut_ptr(), 1024, ptr::null_mut(), 0);
+        if hr >= 0 {
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+            let target_path = String::from_utf16_lossy(&buf[..len]);
+            if !target_path.is_empty() {
+                let path_obj = std::path::Path::new(&target_path);
+                let name = path_obj
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                ((*pf_vtbl).release)(persist_file);
+                ((*sl_vtbl).release)(shell_link);
+                if co_result >= 0 { CoUninitialize(); }
+                return Some((name, target_path));
+            }
+        }
+
+        ((*pf_vtbl).release)(persist_file);
+        ((*sl_vtbl).release)(shell_link);
+        if co_result >= 0 { CoUninitialize(); }
+        None
+    }
+}
 
 // ビルドスクリプトによって出力されたRustコードを取り込む
 slint::include_modules!();
@@ -142,23 +277,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 2. アプリの追加処理（複数ファイル対応）
+    // 2. アプリの追加処理（複数ファイル対応、.lnk は解決）
     let apps_model_clone = apps_model.clone();
     let shared_apps_clone = shared_apps.clone();
     ui.on_add_app_clicked(move || {
         if let Some(file_paths) = FileDialog::new()
-            .add_filter("実行可能ファイル", &["exe", "lnk", "bat"])
+            .add_filter("実行可能ファイル", &["exe", "lnk"])
             .pick_files()
         {
             let mut new_apps = Vec::new();
 
             for file_path in &file_paths {
-                let name = file_path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Unknown")
-                    .to_string();
-                let path = file_path.to_string_lossy().to_string();
+                let path_str = file_path.to_string_lossy().to_string();
+                let (name, path) = if path_str.to_lowercase().ends_with(".lnk") {
+                    resolve_lnk(&path_str).unwrap_or_else(|| {
+                        let n = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
+                        (n, path_str.clone())
+                    })
+                } else {
+                    let n = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
+                    (n, path_str)
+                };
 
                 new_apps.push(SavedApp { name: name.clone(), path: path.clone() });
 
@@ -275,14 +414,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         }
 
+        let allowed_extensions = ["exe", "lnk"];
         let mut new_apps = Vec::new();
         for file_path in &paths {
-            let name = file_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown")
-                .to_string();
-            let path = file_path.to_string_lossy().to_string();
+            let ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+                .unwrap_or_default();
+            if !allowed_extensions.contains(&ext.as_str()) {
+                continue;
+            }
+            let path_str = file_path.to_string_lossy().to_string();
+            let (name, path) = if path_str.to_lowercase().ends_with(".lnk") {
+                resolve_lnk(&path_str).unwrap_or_else(|| {
+                    let n = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
+                    (n, path_str.clone())
+                })
+            } else {
+                let n = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
+                (n, path_str)
+            };
             new_apps.push(SavedApp { name: name.clone(), path: path.clone() });
             apps_model_dnd.push(AppItem {
                 name: SharedString::from(name),
