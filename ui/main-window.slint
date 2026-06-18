@@ -1,5 +1,33 @@
 // ui/app_launcher.slint
-import { Button, ScrollView } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+component StyledButton inherits Rectangle {
+    in-out property <string> text;
+    in-out property <color> text-color: #ffffff;
+    callback clicked;
+
+    min-width: 80px;
+    min-height: 30px;
+    border-radius: 4px;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+        Text {
+            text: root.text;
+            color: root.text-color;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
 
 export struct AppItem {
     name: string,
@@ -76,15 +104,16 @@ export component MainWindow inherits Window {
                             HorizontalLayout {
                                 alignment: center;
                                 spacing: 8px;
-                                Button {
+                                StyledButton {
                                     text: "起動";
-                                   
+                                    background: #3182ce;
                                     clicked => {
                                         root.launch_app(app.path);
                                     }
                                 }
-                                Button {
+                                StyledButton {
                                     text: "削除";
+                                    background: #e53e3e;
                                     clicked => {
                                         root.delete_app(idx);
                                     }
@@ -95,8 +124,9 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Button {
+            StyledButton {
                 text: "+ アプリケーションを追加";
+                background: #38a169;
                 clicked => {
                     root.add_app_clicked();
                 }

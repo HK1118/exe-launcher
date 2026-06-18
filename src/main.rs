@@ -211,17 +211,54 @@ fn load_settings() -> Settings {
 // 4. DnDハンドラ（OSからのファイルドロップをキャプチャ）
 struct DndHandler {
     pending_files: Arc<Mutex<Vec<PathBuf>>>,
+    theme_set: bool,
 }
+
+#[cfg(target_os = "windows")]
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: *mut std::ffi::c_void,
+        dwAttribute: u32,
+        pvAttribute: *const u32,
+        cbAttribute: u32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
 
 impl CustomApplicationHandler for DndHandler {
     fn window_event(
         &mut self,
         _event_loop: &winit::event_loop::ActiveEventLoop,
         _window_id: winit::window::WindowId,
-        _winit_window: Option<&winit::window::Window>,
+        winit_window: Option<&winit::window::Window>,
         _slint_window: Option<&slint::Window>,
         event: &winit::event::WindowEvent,
     ) -> EventResult {
+        #[cfg(target_os = "windows")]
+        if !self.theme_set {
+            if let Some(w) = winit_window {
+                use raw_window_handle::HasWindowHandle;
+                if let Ok(handle) = w.window_handle() {
+                    let raw = handle.as_raw();
+                    if let raw_window_handle::RawWindowHandle::Win32(win32) = raw {
+                        let hwnd = win32.hwnd.get() as *mut std::ffi::c_void;
+                        let value: u32 = 0;
+                        unsafe {
+                            DwmSetWindowAttribute(
+                                hwnd,
+                                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                &value as *const u32,
+                                4,
+                            );
+                        }
+                    }
+                }
+                self.theme_set = true;
+            }
+        }
         if let winit::event::WindowEvent::DroppedFile(path) = event {
             self.pending_files.lock().unwrap().push(path.clone());
         }
@@ -229,12 +266,14 @@ impl CustomApplicationHandler for DndHandler {
     }
 }
 
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // DnDバックエンドの設定（MainWindow生成前に必要）
     let pending_files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
     let _backend = slint::BackendSelector::new()
         .with_winit_custom_application_handler(DndHandler {
             pending_files: pending_files.clone(),
+            theme_set: false,
         })
         .select();
 
