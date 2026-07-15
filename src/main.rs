@@ -180,6 +180,7 @@ fn save_apps(apps: &[SavedApp]) {
 #[derive(Serialize, Deserialize, Clone)]
 struct Settings {
     confirm_on_delete: bool,
+    show_edit_buttons: bool,
     app_name_font_size: i32,
     app_path_font_size: i32,
 }
@@ -188,6 +189,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             confirm_on_delete: true,
+            show_edit_buttons: true,
             app_name_font_size: 14,
             app_path_font_size: 11,
         }
@@ -304,6 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = load_settings();
     ui.set_app_name_font_size(settings.app_name_font_size);
     ui.set_app_path_font_size(settings.app_path_font_size);
+    ui.set_show_edit_buttons(settings.show_edit_buttons);
     let confirm_on_delete = Arc::new(AtomicBool::new(settings.confirm_on_delete));
 
     // --- コールバック処理の実装 ---
