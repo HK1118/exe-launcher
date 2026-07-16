@@ -189,7 +189,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             confirm_on_delete: true,
-            show_edit_buttons: true,
+            show_edit_buttons: false,
             app_name_font_size: 14,
             app_path_font_size: 11,
         }
