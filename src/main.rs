@@ -311,11 +311,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- コールバック処理の実装 ---
 
+    // 0. トースト通知の設定
+    let ui_handle_for_toast = ui.as_weak();
+    let toast_timer = Rc::new(Timer::default());
+    let toast_timer_clone = toast_timer.clone();
+    ui.on_toast_close(move || {
+        if let Some(ui) = ui_handle_for_toast.upgrade() {
+            ui.set_toast_text(SharedString::default());
+        }
+        toast_timer_clone.stop();
+    });
+
     // 1. 起動処理
-    ui.on_launch_app(|path| {
+    let ui_handle_launch = ui.as_weak();
+    let toast_timer_clone = toast_timer.clone();
+    ui.on_launch_app(move |path| {
         let path_str = path.to_string();
         if let Err(err) = std::process::Command::new(&path_str).spawn() {
-            eprintln!("Failed to launch {}: {}", path_str, err);
+            let msg = format!("{}を起動できませんでした: {}", path_str, err);
+            eprintln!("{}", msg);
+            if let Some(ui) = ui_handle_launch.upgrade() {
+                ui.set_toast_text(SharedString::from(&msg));
+                let ui_timer = ui.as_weak();
+                toast_timer_clone.start(
+                    TimerMode::SingleShot,
+                    std::time::Duration::from_secs(5),
+                    move || {
+                        if let Some(ui) = ui_timer.upgrade() {
+                            ui.set_toast_text(SharedString::default());
+                        }
+                    },
+                );
+            }
         }
     });
 
@@ -373,7 +400,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let confirm = rfd::MessageDialog::new()
                     .set_level(rfd::MessageLevel::Warning)
                     .set_title("削除の確認")
-                    .set_description(format!("「{}」を一覧から削除してもよろしいですか？", app_name))
+                    .set_description(format!("{}を一覧から削除してもよろしいですか？", app_name))
                     .set_buttons(rfd::MessageButtons::YesNo)
                     .show();
 

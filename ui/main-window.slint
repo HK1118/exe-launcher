@@ -53,6 +53,8 @@ export component MainWindow inherits Window {
     in-out property <int> app_name_font_size: 14;
     in-out property <int> app_path_font_size: 11;
     in-out property <bool> show_edit_buttons: true;
+    in-out property <string> toast-text: "";
+    callback toast-close();
 
     FocusScope {
         VerticalLayout {
@@ -140,6 +142,43 @@ export component MainWindow inherits Window {
             y: 20px;
             clicked => {
                 root.add_app_clicked();
+            }
+        }
+    }
+
+    if root.toast-text != "" : Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 20px;
+        background: #2d3748;
+        border-radius: 8px;
+        min-width: 200px;
+        max-width: root.width - 40px;
+        height: toast-layout.preferred-height + 24px;
+
+        toast-ta := TouchArea {
+            clicked => { root.toast-close(); }
+        }
+
+        toast-layout := HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 16px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            spacing: 12px;
+            alignment: start;
+
+            Text {
+                text: "⚠";
+                color: #f6e05e;
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.toast-text;
+                color: #ffffff;
+                font-size: 13px;
+                vertical-alignment: center;
+                wrap: word-wrap;
             }
         }
     }
