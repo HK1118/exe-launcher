@@ -120,7 +120,7 @@ export component MainWindow inherits Window {
                                 spacing: 8px;
                                 StyledButton {
                                     text: "削除";
-                                    button-color: #e53e3e;
+                                    button-color: #f56565;
                                     visible: root.show_edit_buttons;
                                     clicked => {
                                         root.delete_app(idx);
@@ -135,7 +135,7 @@ export component MainWindow inherits Window {
 
         if root.show_edit_buttons : StyledButton {
             text: "+ 追加";
-            button-color: #38a169;
+            button-color: #48bb78;
             width: 80px;
             height: 30px;
             x: root.width - self.width - 20px;
