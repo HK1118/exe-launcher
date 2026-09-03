@@ -1,18 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
-use std::rc::Rc;
+use notify::{Event, Watcher};
+use rfd::FileDialog;
+use serde::{Deserialize, Serialize};
+use slint::winit_030::{CustomApplicationHandler, EventResult};
+use slint::{Model, SharedString, Timer, TimerMode, VecModel};
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::ptr;
-use slint::{Model, VecModel, SharedString, Timer, TimerMode};
-use rfd::FileDialog;
-use serde::{Serialize, Deserialize};
-use notify::{Watcher, Event};
-use slint::winit_030::{CustomApplicationHandler, EventResult};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 type Hresult = i32;
 
@@ -60,15 +60,29 @@ extern "system" {
 
 #[repr(C)]
 struct IShellLinkWVtbl {
-    query_interface: unsafe extern "system" fn(*mut std::ffi::c_void, *const Guid, *mut *mut std::ffi::c_void) -> Hresult,
+    query_interface: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *const Guid,
+        *mut *mut std::ffi::c_void,
+    ) -> Hresult,
     add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
     release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
-    get_path: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u16, i32, *mut std::ffi::c_void, u32) -> Hresult,
+    get_path: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *mut u16,
+        i32,
+        *mut std::ffi::c_void,
+        u32,
+    ) -> Hresult,
 }
 
 #[repr(C)]
 struct IPersistFileVtbl {
-    query_interface: unsafe extern "system" fn(*mut std::ffi::c_void, *const Guid, *mut *mut std::ffi::c_void) -> Hresult,
+    query_interface: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *const Guid,
+        *mut *mut std::ffi::c_void,
+    ) -> Hresult,
     add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
     release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
     get_class_id: unsafe extern "system" fn(*mut std::ffi::c_void, *mut Guid) -> Hresult,
@@ -77,7 +91,10 @@ struct IPersistFileVtbl {
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn resolve_lnk(path: &str) -> Option<(String, String)> {
@@ -96,7 +113,9 @@ fn resolve_lnk(path: &str) -> Option<(String, String)> {
             &mut shell_link,
         );
         if hr < 0 || shell_link.is_null() {
-            if co_result >= 0 { CoUninitialize(); }
+            if co_result >= 0 {
+                CoUninitialize();
+            }
             return None;
         }
 
@@ -106,7 +125,9 @@ fn resolve_lnk(path: &str) -> Option<(String, String)> {
         let hr = ((*sl_vtbl).query_interface)(shell_link, &IID_IPERSIST_FILE, &mut persist_file);
         if hr < 0 || persist_file.is_null() {
             ((*sl_vtbl).release)(shell_link);
-            if co_result >= 0 { CoUninitialize(); }
+            if co_result >= 0 {
+                CoUninitialize();
+            }
             return None;
         }
 
@@ -116,7 +137,9 @@ fn resolve_lnk(path: &str) -> Option<(String, String)> {
         if hr < 0 {
             ((*pf_vtbl).release)(persist_file);
             ((*sl_vtbl).release)(shell_link);
-            if co_result >= 0 { CoUninitialize(); }
+            if co_result >= 0 {
+                CoUninitialize();
+            }
             return None;
         }
 
@@ -126,7 +149,7 @@ fn resolve_lnk(path: &str) -> Option<(String, String)> {
             let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
             let target_path = String::from_utf16_lossy(&buf[..len]);
             if !target_path.is_empty() {
-                let path_obj = std::path::Path::new(&target_path);
+                let path_obj = Path::new(&target_path);
                 let name = path_obj
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -134,14 +157,18 @@ fn resolve_lnk(path: &str) -> Option<(String, String)> {
                     .to_string();
                 ((*pf_vtbl).release)(persist_file);
                 ((*sl_vtbl).release)(shell_link);
-                if co_result >= 0 { CoUninitialize(); }
+                if co_result >= 0 {
+                    CoUninitialize();
+                }
                 return Some((name, target_path));
             }
         }
 
         ((*pf_vtbl).release)(persist_file);
         ((*sl_vtbl).release)(shell_link);
-        if co_result >= 0 { CoUninitialize(); }
+        if co_result >= 0 {
+            CoUninitialize();
+        }
         None
     }
 }
@@ -149,34 +176,49 @@ fn resolve_lnk(path: &str) -> Option<(String, String)> {
 // ビルドスクリプトによって出力されたRustコードを取り込む
 slint::include_modules!();
 
-// 1. 保存用の構造体（差分比較のため PartialEq を実装）
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct SavedApp {
     name: String,
     path: String,
 }
 
-// 2. メイン（UI）スレッドからのみアクセスされる、モデルへのスレッドローカル参照
 thread_local! {
     static APPS_MODEL: RefCell<Option<Rc<VecModel<AppItem>>>> = const { RefCell::new(None) };
 }
 
-// ファイルからデータを読み込む関数
-fn load_apps() -> Vec<SavedApp> {
-    std::fs::read_to_string("apps.json")
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
-}
+/// 実行ファイルの置かれているディレクトリ配下のパスを取得
+fn get_data_path(file_name: &str) -> PathBuf {
+    #[cfg(debug_assertions)]
+    {
+        // cargo run のときはカレントディレクトリ（プロジェクトルート）を使う
+        PathBuf::from(file_name)
+    }
 
-// jsonファイルに保存する関数
-fn save_apps(apps: &[SavedApp]) {
-    if let Ok(json) = serde_json::to_string_pretty(apps) {
-        let _ = std::fs::write("apps.json", json);
+    #[cfg(not(debug_assertions))]
+    {
+        // 本番ビルド (cargo build --release) のときは exe と同じフォルダを使う
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|parent| parent.join(file_name)))
+            .unwrap_or_else(|| PathBuf::from(file_name))
     }
 }
 
-// 3. 設定用の構造体
+/// apps.json の読み込み（パース失敗時は None を返し、前回の状態を破壊しない）
+fn load_apps() -> Option<Vec<SavedApp>> {
+    let path = get_data_path("apps.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// apps.json の保存
+fn save_apps(apps: &[SavedApp]) {
+    let path = get_data_path("apps.json");
+    if let Ok(json) = serde_json::to_string_pretty(apps) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct Settings {
     confirm_on_delete: bool,
@@ -196,23 +238,85 @@ impl Default for Settings {
     }
 }
 
-// settings.json から読み込む（なければデフォルトで作成）
 fn load_settings() -> Settings {
-    match std::fs::read_to_string("settings.json") {
+    let path = get_data_path("settings.json");
+    match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => {
             let defaults = Settings::default();
             if let Ok(json) = serde_json::to_string_pretty(&defaults) {
-                let _ = std::fs::write("settings.json", json);
+                let _ = std::fs::write(path, json);
             }
             defaults
         }
     }
 }
 
-// 4. DnDハンドラ（OSからのファイルドロップをキャプチャ）
+/// 複数ファイル（ダイアログまたはDnD）からアプリを追加する共通関数（重複防止付き）
+fn add_apps_from_paths(
+    paths: &[PathBuf],
+    shared_apps: &Arc<Mutex<Vec<SavedApp>>>,
+    apps_model: &Rc<VecModel<AppItem>>,
+) {
+    let allowed_extensions = ["exe", "lnk"];
+    let mut new_saved = Vec::new();
+    let mut current_apps = shared_apps.lock().unwrap();
+
+    for file_path in paths {
+        let ext = file_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+
+        if !allowed_extensions.contains(&ext.as_str()) {
+            continue;
+        }
+
+        let path_str = file_path.to_string_lossy().to_string();
+        let (name, target_path) = if ext == "lnk" {
+            resolve_lnk(&path_str).unwrap_or_else(|| {
+                let n = file_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                (n, path_str)
+            })
+        } else {
+            let n = file_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            (n, path_str)
+        };
+
+        // 既に同じパスが登録されている場合はスキップ
+        if current_apps.iter().any(|app| app.path == target_path) {
+            continue;
+        }
+
+        new_saved.push(SavedApp {
+            name: name.clone(),
+            path: target_path.clone(),
+        });
+
+        apps_model.push(AppItem {
+            name: SharedString::from(name),
+            path: SharedString::from(target_path),
+        });
+    }
+
+    if !new_saved.is_empty() {
+        current_apps.extend(new_saved);
+        save_apps(&current_apps);
+    }
+}
+
+// 4. DnDハンドラ
 struct DndHandler {
-    pending_files: Arc<Mutex<Vec<PathBuf>>>,
+    shared_apps: Arc<Mutex<Vec<SavedApp>>>,
     theme_set: bool,
 }
 
@@ -261,31 +365,38 @@ impl CustomApplicationHandler for DndHandler {
                 self.theme_set = true;
             }
         }
+
+        // ファイルがドロップされたらタイマーを待たずにUIスレッド上で直接追加処理を実行
         if let winit::event::WindowEvent::DroppedFile(path) = event {
-            self.pending_files.lock().unwrap().push(path.clone());
+            let path = path.clone();
+            let shared_apps = self.shared_apps.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                APPS_MODEL.with(|m| {
+                    if let Some(ref model) = *m.borrow() {
+                        add_apps_from_paths(&[path], &shared_apps, model);
+                    }
+                });
+            });
         }
         EventResult::Propagate
     }
 }
 
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // DnDバックエンドの設定（MainWindow生成前に必要）
-    let pending_files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let loaded_apps = load_apps().unwrap_or_default();
+    let shared_apps = Arc::new(Mutex::new(loaded_apps.clone()));
+
+    // DnDバックエンドの設定
     let _backend = slint::BackendSelector::new()
         .with_winit_custom_application_handler(DndHandler {
-            pending_files: pending_files.clone(),
+            shared_apps: shared_apps.clone(),
             theme_set: false,
         })
         .select();
 
     let ui = MainWindow::new()?;
 
-    // データの読み込みと、スレッド間で共有する「現在の最新データ状態」
-    let loaded_apps = load_apps();
-    let shared_apps = Arc::new(Mutex::new(loaded_apps.clone()));
-
-    // SlintのUIと同期するためのモデルを構築
+    // SlintのUIモデルを構築
     let apps_model = Rc::new(VecModel::<AppItem>::default());
     for app in &loaded_apps {
         apps_model.push(AppItem {
@@ -294,24 +405,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // 後からファイル監視スレッド経由で安全にアクセスできるよう、スレッドローカルに保管
     APPS_MODEL.with(|m| {
         *m.borrow_mut() = Some(apps_model.clone());
     });
 
-    // UIにモデルを設定
     ui.set_apps(apps_model.clone().into());
 
-    // 設定の読み込みと適用
     let settings = load_settings();
     ui.set_app_name_font_size(settings.app_name_font_size);
     ui.set_app_path_font_size(settings.app_path_font_size);
     ui.set_show_edit_buttons(settings.show_edit_buttons);
     let confirm_on_delete = Arc::new(AtomicBool::new(settings.confirm_on_delete));
 
-    // --- コールバック処理の実装 ---
-
-    // 0. トースト通知の設定
+    // トースト通知の閉じるコールバック
     let ui_handle_for_toast = ui.as_weak();
     let toast_timer = Rc::new(Timer::default());
     let toast_timer_clone = toast_timer.clone();
@@ -322,12 +428,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         toast_timer_clone.stop();
     });
 
-    // 1. 起動処理
+    // 1. 起動処理（作業ディレクトリを実行ファイルの場所に設定）
     let ui_handle_launch = ui.as_weak();
     let toast_timer_clone = toast_timer.clone();
     ui.on_launch_app(move |path| {
         let path_str = path.to_string();
-        if let Err(err) = std::process::Command::new(&path_str).spawn() {
+        let target_path = Path::new(&path_str);
+
+        let mut cmd = std::process::Command::new(target_path);
+        // カレントディレクトリをexeの親フォルダに設定
+        if let Some(parent) = target_path.parent() {
+            if parent.exists() && parent.is_dir() {
+                cmd.current_dir(parent);
+            }
+        }
+
+        if let Err(err) = cmd.spawn() {
             let msg = format!("{}を起動できませんでした: {}", path_str, err);
             eprintln!("{}", msg);
             if let Some(ui) = ui_handle_launch.upgrade() {
@@ -346,7 +462,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 2. アプリの追加処理（複数ファイル対応、.lnk は解決）
+    // 2. アプリの追加処理
     let apps_model_clone = apps_model.clone();
     let shared_apps_clone = shared_apps.clone();
     ui.on_add_app_clicked(move || {
@@ -354,43 +470,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .add_filter("実行可能ファイル", &["exe", "lnk"])
             .pick_files()
         {
-            let mut new_apps = Vec::new();
-
-            for file_path in &file_paths {
-                let path_str = file_path.to_string_lossy().to_string();
-                let (name, path) = if path_str.to_lowercase().ends_with(".lnk") {
-                    resolve_lnk(&path_str).unwrap_or_else(|| {
-                        let n = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
-                        (n, path_str.clone())
-                    })
-                } else {
-                    let n = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
-                    (n, path_str)
-                };
-
-                new_apps.push(SavedApp { name: name.clone(), path: path.clone() });
-
-                apps_model_clone.push(AppItem {
-                    name: SharedString::from(name),
-                    path: SharedString::from(path),
-                });
-            }
-
-            if !new_apps.is_empty() {
-                let mut apps = shared_apps_clone.lock().unwrap();
-                apps.extend(new_apps);
-                save_apps(&apps);
-            }
+            add_apps_from_paths(&file_paths, &shared_apps_clone, &apps_model_clone);
         }
     });
 
-    // 3. アプリの削除処理（確認ダイアログ付き）
+    // 3. アプリの削除処理
     let apps_model_clone = apps_model.clone();
     let shared_apps_clone = shared_apps.clone();
     let confirm_on_delete_clone = confirm_on_delete.clone();
     ui.on_delete_app(move |idx| {
         if idx >= 0 && (idx as usize) < apps_model_clone.row_count() {
-            // 確認ダイアログの表示が設定されている場合のみ表示
             if confirm_on_delete_clone.load(Ordering::Relaxed) {
                 let app_name = apps_model_clone
                     .row_data(idx as usize)
@@ -409,7 +498,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // 共有状態を更新してファイルへ保存
             {
                 let mut apps = shared_apps_clone.lock().unwrap();
                 if (idx as usize) < apps.len() {
@@ -418,104 +506,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // UIモデルから削除
             apps_model_clone.remove(idx as usize);
         }
     });
 
-    // --- ファイル変更監視（ホットリロード）の設定 ---
+    // 4. ファイル変更監視（ホットリロード）
     let shared_apps_watcher = shared_apps.clone();
     let ui_handle = ui.as_weak();
 
-    // 監視スレッドからのファイルシステムイベントを処理するハンドラ
+    // 監視対象のディレクトリを取得
+    let apps_path = get_data_path("apps.json");
+    let watch_dir = apps_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
         if let Ok(event) = res {
-            // イベントの中に "apps.json" が含まれているか確認
             if event.paths.iter().any(|p| p.ends_with("apps.json")) {
-                let file_apps = load_apps();
-                let mut current_apps = shared_apps_watcher.lock().unwrap();
+                if let Some(file_apps) = load_apps() {
+                    let mut current_apps = shared_apps_watcher.lock().unwrap();
 
-                // 外部エディタなどで中身が「実際に変更された」場合のみUIを更新する
-                // （これがないと、アプリ本体が保存した際にも再ロードが発生してしまいます）
-                if file_apps != *current_apps {
-                    *current_apps = file_apps.clone();
+                    if file_apps != *current_apps {
+                        *current_apps = file_apps.clone();
 
-                    // メインスレッド（UIスレッド）のイベントループ上で安全にモデルを差し替え
-                    let _ = ui_handle.upgrade_in_event_loop(move |_ui| {
-                        APPS_MODEL.with(|m| {
-                            if let Some(ref model) = *m.borrow() {
-                                let new_items: Vec<AppItem> = file_apps
-                                    .into_iter()
-                                    .map(|app| AppItem {
-                                        name: SharedString::from(app.name),
-                                        path: SharedString::from(app.path),
-                                    })
-                                    .collect();
-                                
-                                // Slint 1.16 で提供された set_vec を用いてUIモデル全体を置換
-                                model.set_vec(new_items);
-                            }
+                        let _ = ui_handle.upgrade_in_event_loop(move |_ui| {
+                            APPS_MODEL.with(|m| {
+                                if let Some(ref model) = *m.borrow() {
+                                    let new_items: Vec<AppItem> = file_apps
+                                        .into_iter()
+                                        .map(|app| AppItem {
+                                            name: SharedString::from(app.name),
+                                            path: SharedString::from(app.path),
+                                        })
+                                        .collect();
+
+                                    model.set_vec(new_items);
+                                }
+                            });
                         });
-                    });
+                    }
                 }
             }
         }
     })?;
 
-    // カレントディレクトリ（"."）を監視
-    // （ファイル直接監視は、エディタによっては一時ファイル保存時の挙動により監視が途切れるため、フォルダ監視が推奨されます）
-    watcher.watch(std::path::Path::new("."), notify::RecursiveMode::NonRecursive)?;
-
-    // 監視インスタンス（watcher）がmain関数を抜けて自動消滅（ドロップ）しないよう、変数として保持
+    watcher.watch(watch_dir, notify::RecursiveMode::NonRecursive)?;
     let _watcher = watcher;
-
-    // DnD でドロップされたファイルを定期的に処理
-    let pending_files_timer = pending_files.clone();
-    let apps_model_dnd = apps_model.clone();
-    let shared_apps_dnd = shared_apps.clone();
-    let timer = Timer::default();
-    timer.start(TimerMode::Repeated, std::time::Duration::from_millis(200), move || {
-        let paths: Vec<PathBuf> = {
-            let mut pending = pending_files_timer.lock().unwrap();
-            pending.drain(..).collect()
-        };
-        if paths.is_empty() {
-            return;
-        }
-
-        let allowed_extensions = ["exe", "lnk"];
-        let mut new_apps = Vec::new();
-        for file_path in &paths {
-            let ext = file_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase())
-                .unwrap_or_default();
-            if !allowed_extensions.contains(&ext.as_str()) {
-                continue;
-            }
-            let path_str = file_path.to_string_lossy().to_string();
-            let (name, path) = if path_str.to_lowercase().ends_with(".lnk") {
-                resolve_lnk(&path_str).unwrap_or_else(|| {
-                    let n = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
-                    (n, path_str.clone())
-                })
-            } else {
-                let n = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
-                (n, path_str)
-            };
-            new_apps.push(SavedApp { name: name.clone(), path: path.clone() });
-            apps_model_dnd.push(AppItem {
-                name: SharedString::from(name),
-                path: SharedString::from(path),
-            });
-        }
-
-        let mut apps = shared_apps_dnd.lock().unwrap();
-        apps.extend(new_apps);
-        save_apps(&apps);
-    });
-    let _timer = timer;
 
     ui.run()?;
     Ok(())
